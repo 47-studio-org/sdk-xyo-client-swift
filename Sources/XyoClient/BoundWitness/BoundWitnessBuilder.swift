@@ -6,81 +6,72 @@ public enum BoundWitnessBuilderError: Error {
 }
 
 public class BoundWitnessBuilder {
-    private var _witnesses: [XyoAddress?] = []
-    private var _previous_hashes: [String?] = []
-    private var _payload_hashes: [String] = []
+    private var _accounts: [AccountInstance] = []
+    private var _previous_hashes: [Hash?] = []
+    private var _payload_hashes: [Hash] = []
     private var _payload_schemas: [String] = []
-    private var _payloads: [XyoPayload] = []
-    
+    private var _payloads: [EncodablePayloadInstance] = []
+    private var _query: Hash? = nil
+
     public init() {
-        
     }
-    
-    public func witness(_ address: XyoAddress, _ previousHash: String? = nil) -> BoundWitnessBuilder {
-        _witnesses.append(address)
-        _previous_hashes.append(previousHash)
+
+    public func signer(_ account: AccountInstance)
+        -> BoundWitnessBuilder
+    {
+        _accounts.append(account)
+        _previous_hashes.append(account.previousHash)
         return self
     }
-    
-    public func witnesses(_ witnesses: [XyoWitness]) -> BoundWitnessBuilder {
-        _witnesses.append(contentsOf: witnesses.map { witness in witness.address })
-        _previous_hashes.append(contentsOf: witnesses.map { witness in witness.previousHash })
+
+    public func signers(_ accounts: [AccountInstance]) -> BoundWitnessBuilder {
+        _accounts.append(contentsOf: accounts)
+        _previous_hashes.append(contentsOf: accounts.map { account in account.previousHash })
         return self
     }
-    
-    private func hashableFields() -> XyoBoundWitnessBodyJson {
-        return XyoBoundWitnessBodyJson(
-            _witnesses.map { witness in witness?.addressHex},
-            _previous_hashes,
-            _payload_hashes,
-            _payload_schemas
-        )
-    }
-    
-    public func payload<T: XyoPayload>(_ schema: String, _ payload: T) throws -> BoundWitnessBuilder {
+
+    public func payload<T: EncodablePayloadInstance>(_ schema: String, _ payload: T) throws
+        -> BoundWitnessBuilder
+    {
         _payloads.append(payload)
-        _payload_hashes.append(try payload.hash().toHex())
+        _payload_hashes.append(try PayloadBuilder.dataHash(from: payload))
         _payload_schemas.append(schema)
         return self
     }
-    
-    public func payloads(_ payloads: [XyoPayload]) throws -> BoundWitnessBuilder {
+
+    public func payloads(_ payloads: [EncodablePayloadInstance]) throws -> BoundWitnessBuilder {
         _payloads.append(contentsOf: payloads)
-        _payload_hashes.append(contentsOf: try payloads.map {payload in try payload.hash().toHex()})
-        _payload_schemas.append(contentsOf: payloads.map {payload in payload.schema})
+        _payload_hashes.append(
+            contentsOf: try payloads.map { payload in try PayloadBuilder.dataHash(from: payload) })
+        _payload_schemas.append(contentsOf: payloads.map { payload in payload.schema })
         return self
     }
-    
-    public func sign(_ hash: String) throws -> [String?] {
-        return try self._witnesses.map {
-            try $0?.sign(hash)
+
+    public func query(_ payload: EncodablePayloadInstance) throws -> BoundWitnessBuilder {
+        self._query = try PayloadBuilder.dataHash(from: payload)
+        let _ = try self.payload(payload.schema, payload)
+        return self
+    }
+
+    public func sign(hash: Hash) throws -> [Signature] {
+        return try self._accounts.map {
+            try $0.sign(hash)
         }
     }
-    
-    public func build(_ previousHash: String? = nil) throws -> XyoBoundWitnessJson {
-        let bw = XyoBoundWitnessJson()
-        let hashable = hashableFields()
-        let hash = try BoundWitnessBuilder.hash(hashable)
-        bw._signatures = try self.sign(hash)
-        bw._hash = hash
-        bw._client = "swift"
-        bw._payloads = _payloads
-        bw._previous_hash = previousHash
-        bw.addresses = _witnesses.map { witness in witness?.addressHex!}
-        bw.previous_hashes = _previous_hashes
-        bw.payload_hashes = _payload_hashes
+
+    public func build() throws -> (EncodableBoundWitnessWithMeta, [EncodablePayloadInstance]) {
+        let bw = BoundWitnessInstance()
+        bw.addresses = _accounts.map { account in account.address!.toHex() }
+        bw.previous_hashes = _previous_hashes.map { hash in hash?.toHex() }
+        bw.payload_hashes = _payload_hashes.map { hash in hash.toHex() }
         bw.payload_schemas = _payload_schemas
-        return bw
-    }
-    
-    static func hash<T: Encodable>(_ json: T) throws -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        let data = try encoder.encode(json)
-        
-        guard let str = String(data: data, encoding: .utf8) else {
-            throw BoundWitnessBuilderError.encodingError
+        if _query != nil {
+            bw.query = _query?.toHex()
         }
-        return try str.sha256().toHex()
+        let dataHash = try PayloadBuilder.dataHash(from: bw)
+        let signatures = try self.sign(hash: dataHash).map { signature in signature.toHex() }
+        let meta = BoundWitnessMeta(signatures)
+        let bwWithMeta = EncodableWithCustomMetaInstance(from: bw, meta: meta)
+        return (bwWithMeta, _payloads)
     }
 }
